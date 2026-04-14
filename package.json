@@ -1,0 +1,45 @@
+{
+  "name": "calendarapp",
+  "version": "1.0.0",
+  "description": "",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "typecheck:node": "tsc -p tsconfig.node.json --noEmit",
+    "typecheck:gas": "tsc -p tsconfig.gas.json --noEmit",
+    "build:gas": "node scripts/build-gas.mjs",
+    "clasp:login": "clasp login",
+    "clasp:push": "clasp push",
+    "clasp:pull": "clasp pull",
+    "clasp:status": "clasp status",
+    "build:node": "node scripts/build-node.mjs",
+    "dev:node": "tsx watch src/node/index.ts",
+    "start:node": "node dist/node/index.js",
+    "build": "npm run build:gas && clasp push",
+    "open": "clasp open-script"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/inmyownwords7/CalendarApp.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/inmyownwords7/CalendarApp/issues"
+  },
+  "homepage": "https://github.com/inmyownwords7/CalendarApp#readme",
+  "devDependencies": {
+    "@google/clasp": "^3.2.0",
+    "@types/google-apps-script": "^2.0.8",
+    "@types/node": "^25.3.3",
+    "esbuild": "^0.27.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@notionhq/client": "^5.11.1",
+    "@slack/web-api": "^7.14.1"
+  }
+}

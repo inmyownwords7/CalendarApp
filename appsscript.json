@@ -1,0 +1,26 @@
+{
+  "timeZone": "America/Toronto",
+  "dependencies": {
+    "enabledAdvancedServices": [
+      {
+        "userSymbol": "Calendar",
+        "version": "v3",
+        "serviceId": "calendar"
+      }
+    ],
+    "libraries": [
+      {
+        "userSymbol": "LoggerLib",
+        "version": "3",
+        "libraryId": "1uFjTS1SWs2J_sLsIO_sjVgFe6YizM0X9fH8Hlh1J_vz1cuupVzPsJ4Pw",
+        "developmentMode": false
+      }
+    ]
+  },
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "DOMAIN"
+  }
+}

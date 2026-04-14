@@ -1,2 +1,0 @@
-# CalendarApp
-A calendar App 

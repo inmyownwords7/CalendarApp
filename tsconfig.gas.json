@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2019",
+    "lib": ["ES2019"],
+    "module": "None",
+    "types": ["google-apps-script"],
+    "strict": true,
+    "skipLibCheck": true,
+    "moduleResolution": "node",
+
+    "rootDir": "src",
+    "outDir": "dist/gas",
+
+    "esModuleInterop": true
+  },
+  "include": ["src/gas/**/*.ts", "src/gas/**/*.d.ts", "src/shared/**/*.ts"],
+  "exclude": ["node_modules", "dist", "src/node/**"]
+}

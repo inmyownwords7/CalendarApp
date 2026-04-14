@@ -1,0 +1,117 @@
+<!doctype html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body { font-family: Arial, sans-serif; padding: 12px; }
+    .row { margin: 10px 0; }
+    label { display: block; font-weight: 600; margin-bottom: 4px; }
+    button { padding: 7px 12px; cursor: pointer; }
+    #status { display: inline-block; margin-left: 10px; }
+    .hint { color: #666; font-size: 12px; margin-top: 4px; }
+    .warning { color: #8a5a00; font-size: 12px; margin-top: 6px; }
+  </style>
+</head>
+
+<body>
+  <h3>Calendar Request Manager</h3>
+  <div class="hint" id="loggedInAs">Checking login...</div>
+  <div class="warning" id="identityMode"></div>
+
+  <div class="row">
+    <div class="hint">
+      Click once while signed in. The app will look up your mandate by email and
+      share the matching manager-owned calendar.
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="submit">Request calendar</button>
+    <span id="status"></span>
+  </div>
+
+  <script>
+    const loggedInAsEl = document.getElementById("loggedInAs");
+    const identityModeEl = document.getElementById("identityMode");
+    const statusEl = document.getElementById("status");
+    const submitBtn = document.getElementById("submit");
+
+    function setBusy(isBusy) {
+      submitBtn.disabled = isBusy;
+    }
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
+
+    function setStatusHtml(html) {
+      statusEl.innerHTML = html;
+    }
+
+    function renderIdentity(summary) {
+      const activeEmail = (summary && summary.activeEmail) || "";
+      const effectiveEmail = (summary && summary.effectiveEmail) || "";
+      const isRequesterDeployerSame = Boolean(
+        summary && summary.isRequesterDeployerSame
+      );
+
+      loggedInAsEl.textContent = activeEmail
+        ? `Currently logged in as: ${activeEmail}`
+        : "Currently logged in as: (unknown)";
+
+      if (isRequesterDeployerSame) {
+        identityModeEl.textContent =
+          "Requester and deployer are the same account for this session. Requests will run in self-service mode.";
+        return;
+      }
+
+      if (effectiveEmail) {
+        identityModeEl.textContent =
+          `Requests execute with deployer permissions as: ${effectiveEmail}`;
+        return;
+      }
+
+      identityModeEl.textContent = "";
+    }
+
+    // Fetch identity summary once on page load
+    google.script.run
+      .withSuccessHandler((summary) => {
+        renderIdentity(summary);
+      })
+      .withFailureHandler(() => {
+        loggedInAsEl.textContent = "Currently logged in as: (error)";
+        identityModeEl.textContent = "";
+      })
+      .getIdentitySummary();
+
+    function requestCalendar() {
+      setBusy(true);
+      setStatus("Requesting...");
+
+      google.script.run
+        .withSuccessHandler((res) => {
+          if (res.calendarUrl) {
+            setStatusHtml(
+              `Shared ${res.title} to ${res.email} for ${res.greyBoxId} -
+               <a href="${res.calendarUrl}" target="_blank" rel="noopener">
+               Open calendar settings</a>`
+            );
+          } else {
+            setStatus(`Shared ${res.title} to ${res.email} for ${res.greyBoxId}.`);
+          }
+
+          setBusy(false);
+        })
+        .withFailureHandler((err) => {
+          const msg = (err && err.message) ? err.message : String(err);
+          setStatus("Error: " + msg);
+          setBusy(false);
+        })
+        .requestCalendarForCurrentUser();
+    }
+
+    submitBtn.addEventListener("click", requestCalendar);
+  </script>
+</body>
+</html>
