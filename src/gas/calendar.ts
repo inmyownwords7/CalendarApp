@@ -41,12 +41,274 @@ export type IdentitySummary = {
   isRequesterDeployerSame: boolean;
 };
 
+export type DebugSummary = {
+  activeEmail: string;
+  effectiveEmail: string;
+  isRequesterDeployerSame: boolean;
+  mandateEmail: string;
+  greyBoxId: string;
+  calendarTitle: string;
+  storedCalendarId: string;
+};
+
+export type LoggerHealthSummary = {
+  ok: boolean;
+  spreadsheetId: string;
+  operationalSheet: string;
+  networkSheet: string;
+  operationalSheetExists: boolean;
+  networkSheetExists: boolean;
+  loggerInitialized: boolean;
+  failureStage?: string;
+  errorMessage?: string;
+};
+
 const LOG_SPREADSHEET_ID = "1RFcvNfu07jUPpGQan59UcK6NKUqqiTW4mO1Gmtkvdas";
 const MANDATE_SPREADSHEET_ID = "1pfvdPNPiJx4XnTUAVzstqENOTYl2GgLTYYea5KMWcpg";
-const MANDATE_SHEET_NAME = "Mandate";
+const MANDATE_SHEET_CANDIDATES = ["Mandates", "Mandate"];
 const CALENDAR_PROPERTY_PREFIX = "trackedCalendar:";
+const TRACKING_SPREADSHEET_PROPERTY_KEY = "TRACKING_SPREADSHEET_ID";
 const TRACKED_TIME_SHEET_NAME = "Tracked_Time";
+const DEFAULT_EVENT_LIST_LIMIT = 20;
+const OPERATIONAL_LOG_SHEET_NAME = "Operational_Log";
+const NETWORK_LOG_SHEET_NAME = "Network_Log";
+const FALLBACK_OPERATIONAL_HEADERS = [[
+  "Timestamp",
+  "Log ID",
+  "Level",
+  "Message",
+  "Meta JSON",
+]];
+const FALLBACK_NETWORK_HEADERS = [[
+  "Timestamp",
+  "Parent Log ID",
+  "Message",
+  "System",
+  "Method",
+  "Status",
+  "Duration (ms)",
+  "Meta JSON",
+]];
 let isLoggerInitialized = false;
+
+function ensureSheetExists(
+  spreadsheet: GoogleAppsScript.Spreadsheet.Spreadsheet,
+  sheetName: string
+): GoogleAppsScript.Spreadsheet.Sheet {
+  const existing = spreadsheet.getSheetByName(sheetName);
+  if (existing) {
+    return existing;
+  }
+
+  return spreadsheet.insertSheet(sheetName);
+}
+
+function getLoggerLibRuntime(): Partial<LoggerLibGlobal> {
+  return ((globalThis as Record<string, unknown>).LoggerLib ||
+    {}) as Partial<LoggerLibGlobal>;
+}
+
+function createFallbackOperationalRecord(
+  level: LoggerLibLogLevel,
+  message: string,
+  meta: Record<string, unknown> = {},
+  extra: Partial<LoggerLibOperationalLogRecord> = {}
+): LoggerLibOperationalLogRecord {
+  return {
+    kind: "operational",
+    ts: new Date(),
+    logId: `fallback-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    level,
+    message,
+    meta,
+    correlationId: extra.correlationId,
+    parentLogId: extra.parentLogId,
+  };
+}
+
+function stringifyMeta(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? {});
+  } catch (error) {
+    return JSON.stringify({
+      message: "Failed to serialize log payload",
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function ensureFallbackHeaders(
+  sheet: GoogleAppsScript.Spreadsheet.Sheet,
+  headers: string[][]
+): void {
+  if (sheet.getLastRow() > 0) {
+    return;
+  }
+
+  sheet.getRange(1, 1, 1, headers[0].length).setValues(headers);
+  sheet.getRange("A:A").setNumberFormat("yyyy-mm-dd hh:mm:ss");
+}
+
+function appendFallbackRows(
+  sheet: GoogleAppsScript.Spreadsheet.Sheet,
+  rows: unknown[][]
+): void {
+  if (!rows.length) {
+    return;
+  }
+
+  const startRow = sheet.getLastRow() + 1;
+  sheet.getRange(startRow, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+function appendFallbackOperationalRecord(record: LoggerLibOperationalLogRecord): void {
+  try {
+    const spreadsheet = SpreadsheetApp.openById(LOG_SPREADSHEET_ID);
+    const sheet = ensureSheetExists(spreadsheet, OPERATIONAL_LOG_SHEET_NAME);
+    ensureFallbackHeaders(sheet, FALLBACK_OPERATIONAL_HEADERS);
+    appendFallbackRows(sheet, [[
+      record.ts,
+      record.logId,
+      record.level,
+      record.message,
+      stringifyMeta(record.meta),
+    ]]);
+  } catch (error) {
+    console.error("Fallback operational sheet write failed", toErrorMeta(error));
+  }
+}
+
+function appendFallbackNetworkRecord(record: LoggerLibNetworkLogRecord): void {
+  try {
+    const spreadsheet = SpreadsheetApp.openById(LOG_SPREADSHEET_ID);
+    const sheet = ensureSheetExists(spreadsheet, NETWORK_LOG_SHEET_NAME);
+    ensureFallbackHeaders(sheet, FALLBACK_NETWORK_HEADERS);
+    appendFallbackRows(sheet, [[
+      record.ts,
+      record.parentLogId || "",
+      record.message,
+      record.system,
+      record.method,
+      record.status,
+      record.durationMs,
+      stringifyMeta({
+        ...record.meta,
+        url: record.url.raw,
+        ...(record.endpoint ? { endpoint: record.endpoint } : {}),
+        ...(record.requestId ? { requestId: record.requestId } : {}),
+        ...(typeof record.requestBytes === "number"
+          ? { requestBytes: record.requestBytes }
+          : {}),
+        ...(typeof record.responseBytes === "number"
+          ? { responseBytes: record.responseBytes }
+          : {}),
+        ...(record.error ? { error: record.error } : {}),
+      }),
+    ]]);
+  } catch (error) {
+    console.error("Fallback network sheet write failed", toErrorMeta(error));
+  }
+}
+
+function loggerInfo(input: LoggerLibLogInput): LoggerLibOperationalLogRecord {
+  const logger = getLoggerLibRuntime();
+  if (typeof logger.info === "function") {
+    try {
+      return logger.info(input);
+    } catch (error) {
+      console.warn("LoggerLib.info failed; falling back to direct sheet logging.", toErrorMeta(error));
+    }
+  }
+
+  console.log("[Logger fallback][INFO]", input.message, input.meta || {});
+  const record = createFallbackOperationalRecord("INFO", input.message, input.meta || {}, {
+    correlationId: input.correlationId,
+    parentLogId: input.parentLogId,
+  });
+  appendFallbackOperationalRecord(record);
+  return record;
+}
+
+function loggerError(
+  input:
+    | LoggerLibLogInput
+    | { message: string; error: unknown; meta?: Record<string, unknown> }
+): LoggerLibOperationalLogRecord {
+  const logger = getLoggerLibRuntime();
+  if (typeof logger.error === "function") {
+    try {
+      return logger.error(input);
+    } catch (error) {
+      console.warn("LoggerLib.error failed; falling back to direct sheet logging.", toErrorMeta(error));
+    }
+  }
+
+  const meta = "error" in input
+    ? { ...(input.meta || {}), errorDetails: toErrorMeta(input.error) }
+    : input.meta || {};
+  console.error("[Logger fallback][ERROR]", input.message, meta);
+  const record = createFallbackOperationalRecord("ERROR", input.message, meta, {
+    correlationId: "correlationId" in input ? input.correlationId : undefined,
+    parentLogId: "parentLogId" in input ? input.parentLogId : undefined,
+  });
+  appendFallbackOperationalRecord(record);
+  return record;
+}
+
+function loggerHttp(input: {
+  system: "GOOGLE" | "SLACK" | "NOTION" | "OTHER";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  url: LoggerLibUrlInfo;
+  status: number;
+  durationMs: number;
+  message?: string;
+  meta?: Record<string, unknown>;
+  correlationId?: string;
+  parentLogId?: string;
+  requestId?: string;
+  requestBytes?: number;
+  responseBytes?: number;
+  endpoint?: string;
+  error?: {
+    name?: string;
+    message: string;
+    code?: string | number;
+  };
+}): LoggerLibNetworkLogRecord {
+  const logger = getLoggerLibRuntime();
+  if (typeof logger.http === "function") {
+    try {
+      return logger.http(input);
+    } catch (error) {
+      console.warn("LoggerLib.http failed; falling back to direct sheet logging.", toErrorMeta(error));
+    }
+  }
+
+  const message = input.message || `${input.method} ${input.url.raw}`;
+  console.log("[Logger fallback][HTTP]", message, input);
+  const record: LoggerLibNetworkLogRecord = {
+    kind: "network",
+    ts: new Date(),
+    logId: `fallback-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    level: "INFO",
+    message,
+    meta: input.meta || {},
+    correlationId: input.correlationId,
+    parentLogId: input.parentLogId,
+    system: input.system,
+    method: input.method,
+    url: input.url,
+    status: input.status,
+    durationMs: input.durationMs,
+    requestId: input.requestId,
+    requestBytes: input.requestBytes,
+    responseBytes: input.responseBytes,
+    endpoint: input.endpoint,
+    error: input.error,
+  };
+  appendFallbackNetworkRecord(record);
+  return record;
+}
 
 const REQUESTER_DIRECTORY: Record<string, GreyBoxRecord> = {
   "alex.manager@example.com": {
@@ -78,14 +340,117 @@ function logInit(): void {
     return;
   }
 
-  LoggerLib.init({
-    spreadsheetId: LOG_SPREADSHEET_ID,
-    operationalSheet: "Operational_Log",
-    networkSheet: "Network_Log",
-    level: "DEBUG",
-  });
+  try {
+    const spreadsheet = SpreadsheetApp.openById(LOG_SPREADSHEET_ID);
 
-  isLoggerInitialized = true;
+    ensureSheetExists(spreadsheet, OPERATIONAL_LOG_SHEET_NAME);
+    ensureSheetExists(spreadsheet, NETWORK_LOG_SHEET_NAME);
+
+    const logger = getLoggerLibRuntime();
+    if (typeof logger.init === "function") {
+      logger.init({
+        spreadsheetId: LOG_SPREADSHEET_ID,
+        operationalSheet: OPERATIONAL_LOG_SHEET_NAME,
+        networkSheet: NETWORK_LOG_SHEET_NAME,
+        level: "DEBUG",
+      });
+    } else {
+      console.warn("LoggerLib.init is unavailable; continuing without explicit initialization.");
+    }
+
+    isLoggerInitialized = true;
+  } catch (error) {
+    isLoggerInitialized = false;
+    console.error("Logger initialization failed", toErrorMeta(error));
+    throw error;
+  }
+}
+
+function getLoggerHealthInternal(): LoggerHealthSummary {
+  let spreadsheet: GoogleAppsScript.Spreadsheet.Spreadsheet | null = null;
+
+  try {
+    spreadsheet = SpreadsheetApp.openById(LOG_SPREADSHEET_ID);
+  } catch (error) {
+    return {
+      ok: false,
+      spreadsheetId: LOG_SPREADSHEET_ID,
+      operationalSheet: OPERATIONAL_LOG_SHEET_NAME,
+      networkSheet: NETWORK_LOG_SHEET_NAME,
+      operationalSheetExists: false,
+      networkSheetExists: false,
+      loggerInitialized: isLoggerInitialized,
+      failureStage: "open_spreadsheet",
+      errorMessage: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  try {
+    ensureSheetExists(spreadsheet, OPERATIONAL_LOG_SHEET_NAME);
+  } catch (error) {
+    return {
+      ok: false,
+      spreadsheetId: LOG_SPREADSHEET_ID,
+      operationalSheet: OPERATIONAL_LOG_SHEET_NAME,
+      networkSheet: NETWORK_LOG_SHEET_NAME,
+      operationalSheetExists: Boolean(spreadsheet.getSheetByName(OPERATIONAL_LOG_SHEET_NAME)),
+      networkSheetExists: Boolean(spreadsheet.getSheetByName(NETWORK_LOG_SHEET_NAME)),
+      loggerInitialized: isLoggerInitialized,
+      failureStage: "ensure_operational_sheet",
+      errorMessage: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  try {
+    ensureSheetExists(spreadsheet, NETWORK_LOG_SHEET_NAME);
+  } catch (error) {
+    return {
+      ok: false,
+      spreadsheetId: LOG_SPREADSHEET_ID,
+      operationalSheet: OPERATIONAL_LOG_SHEET_NAME,
+      networkSheet: NETWORK_LOG_SHEET_NAME,
+      operationalSheetExists: Boolean(spreadsheet.getSheetByName(OPERATIONAL_LOG_SHEET_NAME)),
+      networkSheetExists: Boolean(spreadsheet.getSheetByName(NETWORK_LOG_SHEET_NAME)),
+      loggerInitialized: isLoggerInitialized,
+      failureStage: "ensure_network_sheet",
+      errorMessage: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  try {
+    const logger = getLoggerLibRuntime();
+    if (typeof logger.init === "function") {
+      logger.init({
+        spreadsheetId: LOG_SPREADSHEET_ID,
+        operationalSheet: OPERATIONAL_LOG_SHEET_NAME,
+        networkSheet: NETWORK_LOG_SHEET_NAME,
+        level: "DEBUG",
+      });
+    }
+    isLoggerInitialized = true;
+  } catch (error) {
+    return {
+      ok: false,
+      spreadsheetId: LOG_SPREADSHEET_ID,
+      operationalSheet: OPERATIONAL_LOG_SHEET_NAME,
+      networkSheet: NETWORK_LOG_SHEET_NAME,
+      operationalSheetExists: Boolean(spreadsheet.getSheetByName(OPERATIONAL_LOG_SHEET_NAME)),
+      networkSheetExists: Boolean(spreadsheet.getSheetByName(NETWORK_LOG_SHEET_NAME)),
+      loggerInitialized: isLoggerInitialized,
+      failureStage: "logger_lib_init",
+      errorMessage: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  return {
+    ok: true,
+    spreadsheetId: LOG_SPREADSHEET_ID,
+    operationalSheet: OPERATIONAL_LOG_SHEET_NAME,
+    networkSheet: NETWORK_LOG_SHEET_NAME,
+    operationalSheetExists: Boolean(spreadsheet.getSheetByName(OPERATIONAL_LOG_SHEET_NAME)),
+    networkSheetExists: Boolean(spreadsheet.getSheetByName(NETWORK_LOG_SHEET_NAME)),
+    loggerInitialized: isLoggerInitialized,
+  };
 }
 
 function toErrorMeta(error: unknown): Record<string, unknown> {
@@ -107,7 +472,7 @@ function logFunctionStart(
   meta: Record<string, unknown> = {}
 ): LoggerLibOperationalLogRecord {
   logInit();
-  return LoggerLib.info({
+  return loggerInfo({
     message: `${functionName} started`,
     meta: {
       functionName,
@@ -123,7 +488,7 @@ function logFunctionSuccess(
   parentLogId?: string
 ): LoggerLibOperationalLogRecord {
   logInit();
-  return LoggerLib.info({
+  return loggerInfo({
     message: `${functionName} completed`,
     parentLogId,
     meta: {
@@ -141,7 +506,7 @@ function logFunctionError(
   parentLogId?: string
 ): LoggerLibOperationalLogRecord {
   logInit();
-  return LoggerLib.error({
+  return loggerError({
     message: `${functionName} failed`,
     error,
     parentLogId,
@@ -169,6 +534,31 @@ function normalizeEmail(email: string): string {
   return (email || "").trim().toLowerCase();
 }
 
+function findHeaderIndex(headers: string[], candidates: string[]): number {
+  for (const candidate of candidates) {
+    const index = headers.indexOf(candidate);
+    if (index !== -1) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function getTrackingSpreadsheetId(): string {
+  const configuredId = (
+    PropertiesService.getScriptProperties().getProperty(
+      TRACKING_SPREADSHEET_PROPERTY_KEY
+    ) || ""
+  ).trim();
+
+  return configuredId || LOG_SPREADSHEET_ID;
+}
+
+function openTrackingSpreadsheet(): GoogleAppsScript.Spreadsheet.Spreadsheet {
+  return SpreadsheetApp.openById(getTrackingSpreadsheetId());
+}
+
 function buildTrackingCalendarTitle(greyBoxId: string): string {
   return `${normalizeGreyBoxId(greyBoxId)} - Tracking Calendar`;
 }
@@ -176,22 +566,29 @@ function buildTrackingCalendarTitle(greyBoxId: string): string {
 function getMandateSheet(): GoogleAppsScript.Spreadsheet.Sheet {
   const startLog = logFunctionStart("getMandateSheet", {
     spreadsheetId: MANDATE_SPREADSHEET_ID,
-    sheetName: MANDATE_SHEET_NAME,
+    sheetNames: MANDATE_SHEET_CANDIDATES,
   });
 
   try {
     const spreadsheet = SpreadsheetApp.openById(MANDATE_SPREADSHEET_ID);
-    const sheet = spreadsheet.getSheetByName(MANDATE_SHEET_NAME);
+    const sheet = MANDATE_SHEET_CANDIDATES
+      .map((name) => spreadsheet.getSheetByName(name))
+      .find(
+        (candidate): candidate is GoogleAppsScript.Spreadsheet.Sheet =>
+          candidate !== null
+      );
 
     if (!sheet) {
-      throw new Error(`Missing required sheet: ${MANDATE_SHEET_NAME}`);
+      throw new Error(
+        `Missing required sheet. Tried: ${MANDATE_SHEET_CANDIDATES.join(", ")}`
+      );
     }
 
     logFunctionSuccess(
       "getMandateSheet",
       {
         spreadsheetId: MANDATE_SPREADSHEET_ID,
-        sheetName: MANDATE_SHEET_NAME,
+        sheetName: sheet.getName(),
       },
       startLog.logId
     );
@@ -202,7 +599,7 @@ function getMandateSheet(): GoogleAppsScript.Spreadsheet.Sheet {
       error,
       {
         spreadsheetId: MANDATE_SPREADSHEET_ID,
-        sheetName: MANDATE_SHEET_NAME,
+        sheetNames: MANDATE_SHEET_CANDIDATES,
       },
       startLog.logId
     );
@@ -227,13 +624,17 @@ function getMandateSheetRecords(): GreyBoxRecord[] {
     }
 
     const headers = values[0].map((value) => String(value).trim());
-    const greyBoxIdIndex = headers.indexOf("greyBoxId");
-    const emailIndex = headers.indexOf("email");
-    const calendarTitleIndex = headers.indexOf("calendarTitle");
+    const greyBoxIdIndex = findHeaderIndex(headers, ["greyBoxId", "Greybox ID"]);
+    const emailIndex = findHeaderIndex(headers, ["email", "Email (Org)"]);
+    const calendarTitleIndex = findHeaderIndex(headers, [
+      "calendarTitle",
+      "Calendar Title",
+      "Title",
+    ]);
 
     if (greyBoxIdIndex === -1 || emailIndex === -1) {
       throw new Error(
-        `Mandate sheet must include 'greyBoxId' and 'email' columns in ${MANDATE_SHEET_NAME}.`
+        `Mandate sheet must include Greybox ID and Email (Org) columns.`
       );
     }
 
@@ -377,17 +778,21 @@ function getMandateMatchByEmail(email: string): MandateMatch {
     const values = sheet.getDataRange().getValues();
 
     if (values.length < 2) {
-      throw new Error(`No mandate rows found in ${MANDATE_SHEET_NAME}.`);
+      throw new Error("No mandate rows found in the mandate sheet.");
     }
 
     const headers = values[0].map((value) => String(value).trim());
-    const greyBoxIdIndex = headers.indexOf("greyBoxId");
-    const emailIndex = headers.indexOf("email");
-    const calendarTitleIndex = headers.indexOf("calendarTitle");
+    const greyBoxIdIndex = findHeaderIndex(headers, ["greyBoxId", "Greybox ID"]);
+    const emailIndex = findHeaderIndex(headers, ["email", "Email (Org)"]);
+    const calendarTitleIndex = findHeaderIndex(headers, [
+      "calendarTitle",
+      "Calendar Title",
+      "Title",
+    ]);
 
     if (greyBoxIdIndex === -1 || emailIndex === -1) {
       throw new Error(
-        `Mandate sheet must include 'greyBoxId' and 'email' columns in ${MANDATE_SHEET_NAME}.`
+        `Mandate sheet must include Greybox ID and Email (Org) columns.`
       );
     }
 
@@ -454,6 +859,36 @@ function getMandateMatchByEmail(email: string): MandateMatch {
   }
 }
 
+function getMandateMatchByIdentifier(identifier: string): MandateMatch {
+  const normalized = (identifier || "").trim();
+
+  if (!normalized) {
+    throw new Error("Identifier is required.");
+  }
+
+  if (normalized.includes("@")) {
+    return getMandateMatchByEmail(normalized);
+  }
+
+  const normalizedGreyBoxId = normalizeGreyBoxId(normalized);
+  const greyBoxRecord = getGreyBoxDirectory()[normalizedGreyBoxId];
+  if (greyBoxRecord) {
+    return { record: greyBoxRecord };
+  }
+
+  const records = Object.values(getGreyBoxDirectory());
+  for (const record of records) {
+    const storedCalendarId = getStoredCalendarId(record.greyBoxId);
+    if (storedCalendarId && storedCalendarId === normalized) {
+      return { record };
+    }
+  }
+
+  throw new Error(
+    `No mandate match found for identifier: ${normalized}`
+  );
+}
+
 function getCalendarPropertyKey(greyBoxId: string): string {
   return `${CALENDAR_PROPERTY_PREFIX}${normalizeGreyBoxId(greyBoxId)}`;
 }
@@ -512,9 +947,10 @@ function shareCalendarWithUser(calendarId: string, email: string): void {
     if (
       message.includes("already exists") ||
       message.includes("duplicate") ||
-      message.includes("ACL")
+      message.includes("ACL") ||
+      message.includes("own access level")
     ) {
-      LoggerLib.info({
+      loggerInfo({
         message: "Calendar was already shared to user",
         meta: {
           action: "SHARE_CALENDAR",
@@ -695,20 +1131,25 @@ function listAllEventsForCalendar(
       const response = calendar.Events.list(calendarId, {
         singleEvents: true,
         orderBy: "startTime",
-        maxResults: 250,
+        maxResults: Math.min(250, DEFAULT_EVENT_LIST_LIMIT),
         pageToken,
       });
 
       items.push(...(response.items || []));
-      pageToken = response.nextPageToken || undefined;
+      pageToken =
+        items.length >= DEFAULT_EVENT_LIST_LIMIT
+          ? undefined
+          : response.nextPageToken || undefined;
     } while (pageToken);
+
+    const limitedItems = items.slice(0, DEFAULT_EVENT_LIST_LIMIT);
 
     logFunctionSuccess(
       "listAllEventsForCalendar",
-      { calendarId, eventCount: items.length },
+      { calendarId, eventCount: limitedItems.length, limit: DEFAULT_EVENT_LIST_LIMIT },
       startLog.logId
     );
-    return items;
+    return limitedItems;
   } catch (error) {
     logFunctionError(
       "listAllEventsForCalendar",
@@ -737,17 +1178,29 @@ function getEventBoundary(eventDate: {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+function formatEventTimeRange(startAt: Date, endAt: Date): string {
+  const timeZone = Session.getScriptTimeZone();
+  const startText = Utilities.formatDate(startAt, timeZone, "yyyy-MM-dd HH:mm");
+  const endText = Utilities.formatDate(endAt, timeZone, "yyyy-MM-dd HH:mm");
+  return `${startText} to ${endText}`;
+}
+
 function getOrCreateTrackedTimeSheet(): GoogleAppsScript.Spreadsheet.Sheet {
   const startLog = logFunctionStart("getOrCreateTrackedTimeSheet", {
     sheetName: TRACKED_TIME_SHEET_NAME,
+    spreadsheetId: getTrackingSpreadsheetId(),
   });
-  const spreadsheet = SpreadsheetApp.openById(MANDATE_SPREADSHEET_ID);
+  const spreadsheet = openTrackingSpreadsheet();
   const existing = spreadsheet.getSheetByName(TRACKED_TIME_SHEET_NAME);
 
   if (existing) {
     logFunctionSuccess(
       "getOrCreateTrackedTimeSheet",
-      { sheetName: TRACKED_TIME_SHEET_NAME, result: "existing" },
+      {
+        sheetName: TRACKED_TIME_SHEET_NAME,
+        result: "existing",
+        spreadsheetId: spreadsheet.getId(),
+      },
       startLog.logId
     );
     return existing;
@@ -756,21 +1209,26 @@ function getOrCreateTrackedTimeSheet(): GoogleAppsScript.Spreadsheet.Sheet {
   const created = spreadsheet.insertSheet(TRACKED_TIME_SHEET_NAME);
   logFunctionSuccess(
     "getOrCreateTrackedTimeSheet",
-    { sheetName: TRACKED_TIME_SHEET_NAME, result: "created" },
+    {
+      sheetName: TRACKED_TIME_SHEET_NAME,
+      result: "created",
+      spreadsheetId: spreadsheet.getId(),
+    },
     startLog.logId
   );
   return created;
 }
 
 function getOrCreateSheet(sheetName: string): GoogleAppsScript.Spreadsheet.Sheet {
-  const startLog = logFunctionStart("getOrCreateSheet", { sheetName });
-  const spreadsheet = SpreadsheetApp.openById(MANDATE_SPREADSHEET_ID);
+  const spreadsheetId = getTrackingSpreadsheetId();
+  const startLog = logFunctionStart("getOrCreateSheet", { sheetName, spreadsheetId });
+  const spreadsheet = openTrackingSpreadsheet();
   const existing = spreadsheet.getSheetByName(sheetName);
 
   if (existing) {
     logFunctionSuccess(
       "getOrCreateSheet",
-      { sheetName, result: "existing" },
+      { sheetName, result: "existing", spreadsheetId: spreadsheet.getId() },
       startLog.logId
     );
     return existing;
@@ -779,7 +1237,7 @@ function getOrCreateSheet(sheetName: string): GoogleAppsScript.Spreadsheet.Sheet
   const created = spreadsheet.insertSheet(sheetName);
   logFunctionSuccess(
     "getOrCreateSheet",
-    { sheetName, result: "created" },
+    { sheetName, result: "created", spreadsheetId: spreadsheet.getId() },
     startLog.logId
   );
   return created;
@@ -821,7 +1279,40 @@ function getTrackedTimeHeaders(): string[] {
 }
 
 function getGreyBoxSheetHeaders(): string[] {
-  return ["EventTitle", "DurationHours"];
+  return [
+    "eventName (title)",
+    "eventId",
+    "startTime",
+    "endTime",
+    "duration",
+    "attendeeEmail",
+    "responseStatus",
+    "wasPresent",
+    "attendanceMarkedBy",
+    "attendanceMarkedAt",
+  ];
+}
+
+function buildGreyBoxAttendanceKey(
+  eventId: string,
+  attendeeEmail: string,
+  startTime: string,
+  endTime: string
+): string {
+  return `${eventId}::${normalizeEmail(attendeeEmail)}::${startTime}::${endTime}`;
+}
+
+function ensureGreyBoxAttendanceFormatting(sheet: GoogleAppsScript.Spreadsheet.Sheet): void {
+  const headers = getGreyBoxSheetHeaders();
+  const wasPresentIndex = headers.indexOf("wasPresent");
+
+  if (wasPresentIndex === -1) {
+    return;
+  }
+
+  const column = wasPresentIndex + 1;
+  const rowCount = Math.max(sheet.getMaxRows() - 1, 1);
+  sheet.getRange(2, column, rowCount, 1).insertCheckboxes();
 }
 
 function getOrCreateGreyBoxSheet(greyBoxId: string): GoogleAppsScript.Spreadsheet.Sheet {
@@ -862,8 +1353,36 @@ function writeValidatedGreyBoxSheet(
   });
   const sheet = getOrCreateGreyBoxSheet(greyBoxId);
   const headers = getGreyBoxSheetHeaders();
-  const validatedRows: Array<Array<string | number>> = [];
+  const validatedRows: Array<Array<string | number | boolean>> = [];
   let totalHours = 0;
+  const existingValues =
+    sheet.getLastRow() > 1
+      ? sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length).getValues()
+      : [];
+  const preservedAttendanceByKey = new Map<
+    string,
+    { wasPresent: string | boolean; attendanceMarkedBy: string; attendanceMarkedAt: string }
+  >();
+
+  existingValues.forEach((row) => {
+    const eventId = String(row[1] || "").trim();
+    const startTime = String(row[2] || "").trim();
+    const endTime = String(row[3] || "").trim();
+    const attendeeEmail = String(row[5] || "").trim();
+
+    if (!eventId || !startTime || !endTime) {
+      return;
+    }
+
+    preservedAttendanceByKey.set(
+      buildGreyBoxAttendanceKey(eventId, attendeeEmail, startTime, endTime),
+      {
+        wasPresent: row[7] as string | boolean,
+        attendanceMarkedBy: String(row[8] || "").trim(),
+        attendanceMarkedAt: String(row[9] || "").trim(),
+      }
+    );
+  });
 
   for (const event of events) {
     if (!event.id || event.status === "cancelled") {
@@ -880,9 +1399,52 @@ function writeValidatedGreyBoxSheet(
     const durationHours = Number(
       Math.max(0, (endAt.getTime() - startAt.getTime()) / 3600000).toFixed(2)
     );
-
-    validatedRows.push([event.summary || "Untitled Event", durationHours]);
+    const durationLabel = `${durationHours} hour${durationHours === 1 ? "" : "s"}`;
+    const startTime = Utilities.formatDate(startAt, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
+    const endTime = Utilities.formatDate(endAt, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm");
     totalHours += durationHours;
+
+    const attendees = (event.attendees || []).filter(
+      (attendee) => Boolean((attendee.email || "").trim())
+    );
+
+    if (attendees.length === 0) {
+      const preserved = preservedAttendanceByKey.get(
+        buildGreyBoxAttendanceKey(event.id, "", startTime, endTime)
+      );
+      validatedRows.push([
+        event.summary || "Untitled Event",
+        event.id,
+        startTime,
+        endTime,
+        durationLabel,
+        "",
+        "",
+        preserved ? preserved.wasPresent : "",
+        preserved ? preserved.attendanceMarkedBy : "",
+        preserved ? preserved.attendanceMarkedAt : "",
+      ]);
+      continue;
+    }
+
+    for (const attendee of attendees) {
+      const attendeeEmail = String(attendee.email || "").trim();
+      const preserved = preservedAttendanceByKey.get(
+        buildGreyBoxAttendanceKey(event.id, attendeeEmail, startTime, endTime)
+      );
+      validatedRows.push([
+        event.summary || "Untitled Event",
+        event.id,
+        startTime,
+        endTime,
+        durationLabel,
+        attendeeEmail,
+        String(attendee.responseStatus || ""),
+        preserved ? preserved.wasPresent : "",
+        preserved ? preserved.attendanceMarkedBy : "",
+        preserved ? preserved.attendanceMarkedAt : "",
+      ]);
+    }
   }
 
   sheet.clearContents();
@@ -897,7 +1459,19 @@ function writeValidatedGreyBoxSheet(
   const totalRowIndex = validatedRows.length + 3;
   sheet
     .getRange(totalRowIndex, 1, 1, headers.length)
-    .setValues([["TotalHours", Number(totalHours.toFixed(2))]]);
+    .setValues([[
+      "TotalHours",
+      "",
+      "",
+      "",
+      Number(totalHours.toFixed(2)),
+      "",
+      "",
+      "",
+      "",
+      "",
+    ]]);
+  ensureGreyBoxAttendanceFormatting(sheet);
   logFunctionSuccess(
     "writeValidatedGreyBoxSheet",
     {
@@ -907,6 +1481,145 @@ function writeValidatedGreyBoxSheet(
     },
     startLog.logId
   );
+}
+
+function buildTrackedTimeRowsForRecord(
+  record: GreyBoxRecord,
+  calendarId: string,
+  events: GoogleAppsScript.Calendar.Schema.Event[],
+  syncedAt: Date
+): Array<Array<string | number>> {
+  const rows: Array<Array<string | number>> = [];
+
+  for (const event of events) {
+    if (!event.id || event.status === "cancelled") {
+      continue;
+    }
+
+    const startAt = getEventBoundary(event.start);
+    const endAt = getEventBoundary(event.end);
+
+    if (!startAt || !endAt) {
+      continue;
+    }
+
+    const durationMinutes = Math.max(
+      0,
+      Math.round((endAt.getTime() - startAt.getTime()) / 60000)
+    );
+
+    rows.push([
+      record.greyBoxId,
+      record.email,
+      calendarId,
+      event.id,
+      event.summary || "",
+      startAt.toISOString(),
+      endAt.toISOString(),
+      durationMinutes,
+      Number((durationMinutes / 60).toFixed(2)),
+      syncedAt.toISOString(),
+    ]);
+  }
+
+  return rows;
+}
+
+function upsertTrackedTimeRows(
+  rows: Array<Array<string | number>>,
+  parentLogId?: string,
+  action: string = "SYNC_TRACKED_TIME"
+) {
+  const sheet = getOrCreateTrackedTimeSheet();
+  const headers = getTrackedTimeHeaders();
+  const width = headers.length;
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow === 0) {
+    sheet.getRange(1, 1, 1, width).setValues([headers]);
+  } else {
+    const currentHeaders = sheet.getRange(1, 1, 1, width).getValues()[0];
+    const headersMatch = headers.every((header, index) => currentHeaders[index] === header);
+
+    if (!headersMatch) {
+      sheet.getRange(1, 1, 1, width).setValues([headers]);
+    }
+  }
+
+  const existingLastRow = sheet.getLastRow();
+  const existingValues =
+    existingLastRow > 1
+      ? sheet.getRange(2, 1, existingLastRow - 1, width).getValues()
+      : [];
+
+  const rowIndexByEventKey = new Map<string, number>();
+
+  existingValues.forEach((row, index) => {
+    const calendarId = String(row[2] || "").trim();
+    const eventId = String(row[3] || "").trim();
+
+    if (!calendarId || !eventId) {
+      return;
+    }
+
+    rowIndexByEventKey.set(`${calendarId}:${eventId}`, index + 2);
+  });
+
+  const rowsToAppend: Array<Array<string | number>> = [];
+  let insertedCount = 0;
+  let updatedCount = 0;
+
+  for (const row of rows) {
+    const calendarId = String(row[2] || "").trim();
+    const eventId = String(row[3] || "").trim();
+    const key = `${calendarId}:${eventId}`;
+    const targetRow = rowIndexByEventKey.get(key);
+
+    if (!targetRow) {
+      rowsToAppend.push(row);
+      insertedCount += 1;
+      continue;
+    }
+
+    const currentRow = sheet.getRange(targetRow, 1, 1, width).getValues()[0];
+    const hasChanged = row.some((value, index) => currentRow[index] !== value);
+
+    if (!hasChanged) {
+      continue;
+    }
+
+    sheet.getRange(targetRow, 1, 1, width).setValues([row]);
+    updatedCount += 1;
+  }
+
+  if (rowsToAppend.length > 0) {
+    const appendStartRow = sheet.getLastRow() + 1;
+    sheet
+      .getRange(appendStartRow, 1, rowsToAppend.length, width)
+      .setValues(rowsToAppend);
+  }
+
+  loggerInfo({
+    message: "Tracked time synced to sheet",
+    parentLogId,
+    meta: {
+      action,
+      rowCount: rows.length,
+      insertedCount,
+      updatedCount,
+      sheetName: TRACKED_TIME_SHEET_NAME,
+      spreadsheetId: getTrackingSpreadsheetId(),
+    },
+  });
+
+  return {
+    ok: true,
+    rowCount: rows.length,
+    insertedCount,
+    updatedCount,
+    sheetName: TRACKED_TIME_SHEET_NAME,
+    spreadsheetId: getTrackingSpreadsheetId(),
+  };
 }
 
 export function listAvailableGreyBoxIds(): string[] {
@@ -931,6 +1644,30 @@ export function listEvents(calendarId: string) {
   }
 }
 
+export function listAllEventsForCurrentUser() {
+  logInit();
+  const context = getEventTrackingContextForCurrentUserInternal();
+  const events = listAllEventsForCalendar(context.calendarId);
+  writeValidatedGreyBoxSheet(context.greyBoxId, events);
+  return events;
+}
+
+export function listAllEventsForIdentifier(identifier: string) {
+  logInit();
+  const match = getMandateMatchByIdentifier(identifier);
+  const calendarId = getStoredCalendarId(match.record.greyBoxId);
+
+  if (!calendarId) {
+    throw new Error(
+      `No stored calendar found for ${match.record.greyBoxId}. Request or create the calendar first.`
+    );
+  }
+
+  const events = listAllEventsForCalendar(calendarId);
+  writeValidatedGreyBoxSheet(match.record.greyBoxId, events);
+  return events;
+}
+
 export function insertEvent(
   calendarId: string,
   event: GoogleAppsScript.Calendar.Schema.Event
@@ -940,7 +1677,7 @@ export function insertEvent(
 
   try {
     const ev = calendar.Events.insert(event, calendarId);
-    LoggerLib.info({
+    loggerInfo({
       message: "Event inserted successfully",
       meta: {
         action: "INSERT_EVENT",
@@ -951,7 +1688,7 @@ export function insertEvent(
     });
     return ev;
   } catch (error) {
-    LoggerLib.error({
+    loggerError({
       message: "Failed to insert event",
       error,
       meta: {
@@ -967,12 +1704,12 @@ export function insertEvent(
 export function start(): void {
   logInit();
 
-  LoggerLib.info({
+  loggerInfo({
     message: "Identity sync started",
     meta: { source: "identityBuild" },
   });
 
-  LoggerLib.http({
+  loggerHttp({
     system: "SLACK",
     method: "GET",
     url: { raw: "https://slack.com/api/users.list" },
@@ -986,7 +1723,7 @@ export function getCurrentUserEmail(): string {
 
   const email = Session.getActiveUser().getEmail() || "";
 
-  const rec = LoggerLib.info({
+  const rec = loggerInfo({
     message: email
       ? "Fetched current user email"
       : "Current user email unavailable",
@@ -995,6 +1732,10 @@ export function getCurrentUserEmail(): string {
 
   Logger.log("logId=" + rec.logId);
   return email;
+}
+
+export function getLoggerHealth(): LoggerHealthSummary {
+  return getLoggerHealthInternal();
 }
 
 export function getIdentitySummary(): IdentitySummary {
@@ -1025,6 +1766,41 @@ export function getIdentitySummary(): IdentitySummary {
     };
   } catch (error) {
     logFunctionError("getIdentitySummary", error, {}, startLog.logId);
+    throw error;
+  }
+}
+
+export function getDebugSummary(): DebugSummary {
+  logInit();
+  const startLog = logFunctionStart("getDebugSummary");
+
+  try {
+    const activeEmail = normalizeEmail(Session.getActiveUser().getEmail() || "");
+    const effectiveEmail = normalizeEmail(Session.getEffectiveUser().getEmail() || "");
+
+    if (!activeEmail) {
+      throw new Error("Could not determine the signed-in user email.");
+    }
+
+    const mandateMatch = getMandateMatchByEmail(activeEmail);
+    const storedCalendarId = getStoredCalendarId(mandateMatch.record.greyBoxId);
+
+    const result: DebugSummary = {
+      activeEmail,
+      effectiveEmail,
+      isRequesterDeployerSame: Boolean(
+        activeEmail && effectiveEmail && activeEmail === effectiveEmail
+      ),
+      mandateEmail: mandateMatch.record.email,
+      greyBoxId: mandateMatch.record.greyBoxId,
+      calendarTitle: mandateMatch.record.calendarTitle,
+      storedCalendarId,
+    };
+
+    logFunctionSuccess("getDebugSummary", result, startLog.logId);
+    return result;
+  } catch (error) {
+    logFunctionError("getDebugSummary", error, {}, startLog.logId);
     throw error;
   }
 }
@@ -1087,7 +1863,7 @@ function createCalendarForEmail(
           };
         })();
 
-    const mainLog = LoggerLib.info({
+    const mainLog = loggerInfo({
       message: "Calendar created successfully",
       parentLogId: startLog.logId,
       meta: {
@@ -1100,7 +1876,7 @@ function createCalendarForEmail(
       },
     });
 
-    LoggerLib.http({
+    loggerHttp({
       parentLogId: mainLog.logId,
       system: "GOOGLE",
       method: "POST",
@@ -1197,7 +1973,7 @@ export function requestCalendarByGreyBoxId(
   try {
     const record = getGreyBoxRecord(greyBoxId);
 
-    LoggerLib.info({
+    loggerInfo({
       message: "Resolved grey-box request",
       parentLogId: startLog.logId,
       meta: {
@@ -1242,7 +2018,7 @@ export function requestCalendarForCurrentUser(): CalendarRequestResponse {
     const context = ensureCalendarForRecord(mandateMatch.record, requesterEmail);
     recordGreyBoxSheetRequest(context);
 
-    LoggerLib.info({
+    loggerInfo({
       message: "Resolved mandate request for signed-in user",
       parentLogId: startLog.logId,
       meta: {
@@ -1314,7 +2090,7 @@ export function listTrackedEventsForCurrentUser() {
   const context = getEventTrackingContextForCurrentUserInternal();
   const calendar = getCalendarService();
 
-  LoggerLib.info({
+  loggerInfo({
     message: "Listing tracked events for current user",
     meta: {
       action: "LIST_TRACKED_EVENTS",
@@ -1377,7 +2153,7 @@ export function recordTrackedTimeForCurrentUser(input: TimeEntryInput) {
     end: { dateTime: endAt.toISOString() },
   };
 
-  LoggerLib.info({
+  loggerInfo({
     message: "Recording tracked time for current user",
     meta: {
       action: "RECORD_TRACKED_TIME",
@@ -1407,10 +2183,37 @@ export function recordTrackedTimeForCurrentUser(input: TimeEntryInput) {
 export function syncTrackedTimeToSheet() {
   logInit();
   const startLog = logFunctionStart("syncTrackedTimeToSheet");
-
-  const records = Object.values(getGreyBoxDirectory());
-  const rows: Array<Array<string | number>> = [];
   const syncedAt = new Date();
+  const context = getEventTrackingContextForCurrentUserInternal();
+  const events = listAllEventsForCalendar(context.calendarId);
+  writeValidatedGreyBoxSheet(context.greyBoxId, events);
+
+  const rows = buildTrackedTimeRowsForRecord(
+    {
+      greyBoxId: context.greyBoxId,
+      email: context.requesterEmail,
+      calendarTitle: context.calendarTitle,
+    },
+    context.calendarId,
+    events,
+    syncedAt
+  );
+
+  return {
+    ...upsertTrackedTimeRows(rows, startLog.logId, "SYNC_TRACKED_TIME"),
+    greyBoxId: context.greyBoxId,
+    email: context.requesterEmail,
+    calendarId: context.calendarId,
+    syncedAt: syncedAt.toISOString(),
+  };
+}
+
+export function syncAllTrackedTimeToSheet() {
+  logInit();
+  const startLog = logFunctionStart("syncAllTrackedTimeToSheet");
+  const records = Object.values(getGreyBoxDirectory());
+  const syncedAt = new Date();
+  const rows: Array<Array<string | number>> = [];
 
   for (const record of records) {
     const calendarId = getStoredCalendarId(record.greyBoxId);
@@ -1422,43 +2225,13 @@ export function syncTrackedTimeToSheet() {
     try {
       const events = listAllEventsForCalendar(calendarId);
       writeValidatedGreyBoxSheet(record.greyBoxId, events);
-
-      for (const event of events) {
-        if (!event.id || event.status === "cancelled") {
-          continue;
-        }
-
-        const startAt = getEventBoundary(event.start);
-        const endAt = getEventBoundary(event.end);
-
-        if (!startAt || !endAt) {
-          continue;
-        }
-
-        const durationMinutes = Math.max(
-          0,
-          Math.round((endAt.getTime() - startAt.getTime()) / 60000)
-        );
-
-        rows.push([
-          record.greyBoxId,
-          record.email,
-          calendarId,
-          event.id,
-          event.summary || "",
-          startAt.toISOString(),
-          endAt.toISOString(),
-          durationMinutes,
-          Number((durationMinutes / 60).toFixed(2)),
-          syncedAt.toISOString(),
-        ]);
-      }
+      rows.push(...buildTrackedTimeRowsForRecord(record, calendarId, events, syncedAt));
     } catch (error) {
-      LoggerLib.error({
+      loggerError({
         message: "Failed to sync tracked calendar events",
         error,
         meta: {
-          action: "SYNC_TRACKED_TIME",
+          action: "SYNC_ALL_TRACKED_TIME",
           greyBoxId: record.greyBoxId,
           email: record.email,
           calendarId,
@@ -1467,95 +2240,11 @@ export function syncTrackedTimeToSheet() {
     }
   }
 
-  const sheet = getOrCreateTrackedTimeSheet();
-  const headers = getTrackedTimeHeaders();
-  const width = headers.length;
-  const lastRow = sheet.getLastRow();
-
-  if (lastRow === 0) {
-    sheet.getRange(1, 1, 1, width).setValues([headers]);
-  } else {
-    const currentHeaders = sheet.getRange(1, 1, 1, width).getValues()[0];
-    const headersMatch = headers.every((header, index) => currentHeaders[index] === header);
-
-    if (!headersMatch) {
-      sheet.getRange(1, 1, 1, width).setValues([headers]);
-    }
-  }
-
-  const existingLastRow = sheet.getLastRow();
-  const existingValues =
-    existingLastRow > 1
-      ? sheet.getRange(2, 1, existingLastRow - 1, width).getValues()
-      : [];
-
-  const rowIndexByEventKey = new Map<string, number>();
-
-  existingValues.forEach((row, index) => {
-    const calendarId = String(row[2] || "").trim();
-    const eventId = String(row[3] || "").trim();
-
-    if (!calendarId || !eventId) {
-      return;
-    }
-
-    rowIndexByEventKey.set(`${calendarId}:${eventId}`, index + 2);
-  });
-
-  const rowsToAppend: Array<Array<string | number>> = [];
-  let insertedCount = 0;
-  let updatedCount = 0;
-
-  for (const row of rows) {
-    const calendarId = String(row[2] || "").trim();
-    const eventId = String(row[3] || "").trim();
-    const key = `${calendarId}:${eventId}`;
-    const targetRow = rowIndexByEventKey.get(key);
-
-    if (!targetRow) {
-      rowsToAppend.push(row);
-      insertedCount += 1;
-      continue;
-    }
-
-    const currentRow = sheet.getRange(targetRow, 1, 1, width).getValues()[0];
-    const hasChanged = row.some((value, index) => currentRow[index] !== value);
-
-    if (!hasChanged) {
-      continue;
-    }
-
-    sheet.getRange(targetRow, 1, 1, width).setValues([row]);
-    updatedCount += 1;
-  }
-
-  if (rowsToAppend.length > 0) {
-    const appendStartRow = sheet.getLastRow() + 1;
-    sheet
-      .getRange(appendStartRow, 1, rowsToAppend.length, width)
-      .setValues(rowsToAppend);
-  }
-
-  LoggerLib.info({
-    message: "Tracked time synced to sheet",
-    parentLogId: startLog.logId,
-    meta: {
-      action: "SYNC_TRACKED_TIME",
-      rowCount: rows.length,
-      insertedCount,
-      updatedCount,
-      sheetName: TRACKED_TIME_SHEET_NAME,
-      spreadsheetId: MANDATE_SPREADSHEET_ID,
-    },
-  });
-
-  return {
-    ok: true,
-    rowCount: rows.length,
-    insertedCount,
-    updatedCount,
-    sheetName: TRACKED_TIME_SHEET_NAME,
-    spreadsheetId: MANDATE_SPREADSHEET_ID,
+  const result = {
+    ...upsertTrackedTimeRows(rows, startLog.logId, "SYNC_ALL_TRACKED_TIME"),
     syncedAt: syncedAt.toISOString(),
   };
+
+  logFunctionSuccess("syncAllTrackedTimeToSheet", result, startLog.logId);
+  return result;
 }

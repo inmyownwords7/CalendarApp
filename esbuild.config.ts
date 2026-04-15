@@ -1,3 +1,5 @@
+/// <reference types="node" />
+
 import { build } from "esbuild";
 
 await build({

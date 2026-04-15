@@ -7,9 +7,20 @@
     .row { margin: 10px 0; }
     label { display: block; font-weight: 600; margin-bottom: 4px; }
     button { padding: 7px 12px; cursor: pointer; }
+    button + button { margin-left: 8px; }
     #status { display: inline-block; margin-left: 10px; }
     .hint { color: #666; font-size: 12px; margin-top: 4px; }
     .warning { color: #8a5a00; font-size: 12px; margin-top: 6px; }
+    #debug {
+      background: #f5f5f5;
+      border: 1px solid #ddd;
+      padding: 10px;
+      font-family: monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      margin-top: 12px;
+      min-height: 120px;
+    }
   </style>
 </head>
 
@@ -26,18 +37,51 @@
   </div>
 
   <div class="row">
+    <label for="requestIdentifier">Target for listing events</label>
+    <input
+      id="requestIdentifier"
+      type="text"
+      placeholder="email, Grey Box ID, or calendar ID"
+      style="width: 100%; max-width: 520px; padding: 7px;"
+    >
+    <div class="hint">
+      Use this to choose whose tracked calendar to list from the web app.
+    </div>
+  </div>
+
+  <div class="row">
     <button id="submit">Request calendar</button>
+    <button id="listEvents">List events</button>
+    <button id="debugCurrentUser">Check current user</button>
+    <button id="debugLogger">Check logger</button>
+    <button id="debugIdentity">Debug identity</button>
     <span id="status"></span>
+  </div>
+
+  <div class="row">
+    <div class="hint">Debug output</div>
+    <pre id="debug">Waiting for actions...</pre>
   </div>
 
   <script>
     const loggedInAsEl = document.getElementById("loggedInAs");
     const identityModeEl = document.getElementById("identityMode");
     const statusEl = document.getElementById("status");
+    const requestIdentifierEl = document.getElementById("requestIdentifier");
     const submitBtn = document.getElementById("submit");
+    const listEventsBtn = document.getElementById("listEvents");
+    const debugCurrentUserBtn = document.getElementById("debugCurrentUser");
+    const debugLoggerBtn = document.getElementById("debugLogger");
+    const debugIdentityBtn = document.getElementById("debugIdentity");
+    const debugEl = document.getElementById("debug");
 
     function setBusy(isBusy) {
       submitBtn.disabled = isBusy;
+      listEventsBtn.disabled = isBusy;
+      requestIdentifierEl.disabled = isBusy;
+      debugCurrentUserBtn.disabled = isBusy;
+      debugLoggerBtn.disabled = isBusy;
+      debugIdentityBtn.disabled = isBusy;
     }
 
     function setStatus(msg) {
@@ -46,6 +90,48 @@
 
     function setStatusHtml(html) {
       statusEl.innerHTML = html;
+    }
+
+    function debugLine(message, data) {
+      const timestamp = new Date().toLocaleTimeString();
+      const suffix = typeof data === "undefined"
+        ? ""
+        : "\n" + JSON.stringify(data, null, 2);
+      debugEl.textContent = `[${timestamp}] ${message}${suffix}\n\n${debugEl.textContent}`;
+    }
+
+    function runServer(functionName, onSuccess, onFailure) {
+      const runner = google.script.run
+        .withSuccessHandler(onSuccess)
+        .withFailureHandler(onFailure);
+
+      if (typeof runner[functionName] !== "function") {
+        onFailure({
+          message:
+            `Server function ${functionName} is missing from the deployed web app. ` +
+            "Push the latest code and create a new deployment version."
+        });
+        return;
+      }
+
+      runner[functionName]();
+    }
+
+    function runServerWithArgs(functionName, args, onSuccess, onFailure) {
+      const runner = google.script.run
+        .withSuccessHandler(onSuccess)
+        .withFailureHandler(onFailure);
+
+      if (typeof runner[functionName] !== "function") {
+        onFailure({
+          message:
+            `Server function ${functionName} is missing from the deployed web app. ` +
+            "Push the latest code and create a new deployment version."
+        });
+        return;
+      }
+
+      runner[functionName](...args);
     }
 
     function renderIdentity(summary) {
@@ -75,22 +161,99 @@
     }
 
     // Fetch identity summary once on page load
-    google.script.run
-      .withSuccessHandler((summary) => {
+    runServer(
+      "getIdentitySummary",
+      (summary) => {
+        debugLine("Loaded identity summary", summary);
         renderIdentity(summary);
-      })
-      .withFailureHandler(() => {
+      },
+      (err) => {
         loggedInAsEl.textContent = "Currently logged in as: (error)";
         identityModeEl.textContent = "";
-      })
-      .getIdentitySummary();
+        debugLine("Failed to load identity summary", {
+          message: (err && err.message) ? err.message : String(err)
+        });
+      }
+    );
+
+    function debugIdentity() {
+      setBusy(true);
+      setStatus("Loading debug info...");
+      debugLine("Requested debug identity summary");
+
+      runServer(
+        "getDebugSummary",
+        (summary) => {
+          debugLine("Received debug identity summary", summary);
+          setStatus("Debug info loaded.");
+          setBusy(false);
+        },
+        (err) => {
+          const msg = (err && err.message) ? err.message : String(err);
+          debugLine("Debug identity failed", { message: msg });
+          setStatus("Error: " + msg);
+          setBusy(false);
+        }
+      );
+    }
+
+    function debugCurrentUser() {
+      setBusy(true);
+      setStatus("Checking current user...");
+      debugLine("Requested current user email");
+
+      runServer(
+        "getCurrentUserEmail",
+        (email) => {
+          const value = email || "";
+          debugLine("Received current user email", {
+            email: value,
+            isBlank: value === ""
+          });
+          setStatus(value ? `Current user: ${value}` : "Current user email is blank.");
+          setBusy(false);
+        },
+        (err) => {
+          const msg = (err && err.message) ? err.message : String(err);
+          debugLine("Current user check failed", { message: msg });
+          setStatus("Error: " + msg);
+          setBusy(false);
+        }
+      );
+    }
+
+    function debugLogger() {
+      setBusy(true);
+      setStatus("Checking logger...");
+      debugLine("Requested logger health");
+
+      runServer(
+        "getLoggerHealth",
+        (summary) => {
+          debugLine("Received logger health", summary);
+          setStatus(summary && summary.ok
+            ? "Logger looks healthy."
+            : `Logger failed at: ${(summary && summary.failureStage) || "unknown"}`);
+          setBusy(false);
+        },
+        (err) => {
+          const msg = (err && err.message) ? err.message : String(err);
+          debugLine("Logger health check failed", { message: msg });
+          setStatus("Error: " + msg);
+          setBusy(false);
+        }
+      );
+    }
 
     function requestCalendar() {
       setBusy(true);
       setStatus("Requesting...");
+      debugLine("Requested calendar for current user");
 
-      google.script.run
-        .withSuccessHandler((res) => {
+      runServer(
+        "requestCalendarForCurrentUser",
+        (res) => {
+          debugLine("Calendar request succeeded", res);
           if (res.calendarUrl) {
             setStatusHtml(
               `Shared ${res.title} to ${res.email} for ${res.greyBoxId} -
@@ -102,16 +265,55 @@
           }
 
           setBusy(false);
-        })
-        .withFailureHandler((err) => {
+        },
+        (err) => {
           const msg = (err && err.message) ? err.message : String(err);
+          debugLine("Calendar request failed", { message: msg });
           setStatus("Error: " + msg);
           setBusy(false);
-        })
-        .requestCalendarForCurrentUser();
+        }
+      );
+    }
+
+    function listEventsForIdentifier() {
+      const identifier = (requestIdentifierEl.value || "").trim();
+
+      if (!identifier) {
+        setStatus("Enter an email, Grey Box ID, or calendar ID.");
+        return;
+      }
+
+      setBusy(true);
+      setStatus("Listing events...");
+      debugLine("Requested event list for identifier", { identifier });
+
+      runServerWithArgs(
+        "listAllEventsForIdentifier",
+        [identifier],
+        (events) => {
+          debugLine("Received event list", {
+            identifier,
+            eventCount: Array.isArray(events) ? events.length : 0,
+          });
+          setStatus(
+            `Listed ${(Array.isArray(events) ? events.length : 0)} event(s) for ${identifier}.`
+          );
+          setBusy(false);
+        },
+        (err) => {
+          const msg = (err && err.message) ? err.message : String(err);
+          debugLine("List events failed", { identifier, message: msg });
+          setStatus("Error: " + msg);
+          setBusy(false);
+        }
+      );
     }
 
     submitBtn.addEventListener("click", requestCalendar);
+    listEventsBtn.addEventListener("click", listEventsForIdentifier);
+    debugCurrentUserBtn.addEventListener("click", debugCurrentUser);
+    debugLoggerBtn.addEventListener("click", debugLogger);
+    debugIdentityBtn.addEventListener("click", debugIdentity);
   </script>
 </body>
 </html>

@@ -2,7 +2,6 @@
   "name": "calendarapp",
   "version": "1.0.0",
   "description": "",
-  "main": "app.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "typecheck:node": "tsc -p tsconfig.node.json --noEmit",
