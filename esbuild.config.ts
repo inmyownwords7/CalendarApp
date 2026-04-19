@@ -1,16 +1,7 @@
 /// <reference types="node" />
 
-import { build } from "esbuild";
+import { GAS_BUILD_OUTFILE, buildGas } from "./scripts/gas-build.mjs";
 
-await build({
-  entryPoints: ["src/gas/index.ts"],
-  bundle: true,
-  platform: "browser",
-  target: "es2019",
-  format: "iife",
-  outfile: "dist/gas/Code.gs",
-  sourcemap: false,
-  legalComments: "none",
-});
+await buildGas();
 
-console.log("Built dist/gas/Code.gs");
+console.log(`Built ${GAS_BUILD_OUTFILE}`);

@@ -130,9 +130,9 @@ The intended model is:
 - Google Calendar provides RSVP state
 - a human later marks actual attendance using `wasPresent`
 
-## Main Functions
+## Entry Functions
 
-These functions are exposed through `GasBridge.gs` for Apps Script and web app usage.
+These functions are exposed through [src/gas/entrypoints/index.ts](./src/gas/entrypoints/index.ts) on the `globalThis.__calendarApp` namespace for web app and Apps Script usage.
 
 ### Calendar Provisioning
 
@@ -147,13 +147,26 @@ These functions are exposed through `GasBridge.gs` for Apps Script and web app u
 - `listAllEventsForCurrentUser()`
   Lists the current user's tracked calendar events and repopulates that user's sheet.
 
+- `listAllEventsForEmail(email)`
+  Lists events for the person matched by mandate email.
+
+- `listAllEventsForGreyBoxId(greyBoxId)`
+  Lists events for the matched Grey Box ID.
+
+- `listAllEventsForCalendarId(calendarId)`
+  Lists events directly from the supplied calendar ID.
+
+- `listAllEventsForCalendarUrl(calendarUrl)`
+  Extracts a calendar ID from a Google Calendar URL and lists events for it.
+
 - `listAllEventsForIdentifier(identifier)`
-  Lists events for the target identified by:
+  Auto-detects the identifier type and lists events for:
   - email
   - Grey Box ID
   - stored calendar ID
+  - Google Calendar ID
 
-This is the preferred admin/operator function for choosing who to list events for.
+This remains the generic fallback function, but the web UI now prefers explicit mode-specific entrypoints.
 
 ### Sync
 
@@ -175,19 +188,63 @@ This is the preferred admin/operator function for choosing who to list events fo
 
 The web UI is defined in [index.html](./index.html).
 
-Current controls:
+### Page-load Calls
+
+- `getIdentitySummary()`
+  Loads the current requester/effective-user identity state.
+
+- `listAvailableGreyBoxIds()`
+  Loads Grey Box IDs for datalist suggestions and Grey Box prefix autocomplete.
+
+### Buttons
 
 - `Request calendar`
+  Calls `requestCalendarForCurrentUser()`
+
 - `List events`
+  Uses the selected `Lookup by` mode and calls one of:
+  - `listAllEventsForGreyBoxId()`
+  - `listAllEventsForEmail()`
+  - `listAllEventsForCalendarId()`
+  - `listAllEventsForCalendarUrl()`
+  - `listAllEventsForIdentifier()` when `Auto` is selected
+
 - `Check current user`
+  Calls `getCurrentUserEmail()`
+
 - `Check logger`
+  Calls `getLoggerHealth()`
+
 - `Debug identity`
+  Calls `getDebugSummary()`
 
-The `List events` action accepts a target identifier input:
+### UI To GAS Mapping
 
-- email
-- Grey Box ID
-- calendar ID
+| UI control | GAS function | Source |
+| --- | --- | --- |
+| Page load: identity bootstrap | `getIdentitySummary()` | `src/gas/services/calendar.ts` |
+| Page load: Grey Box suggestions | `listAvailableGreyBoxIds()` | `src/gas/services/calendar.ts` |
+| `Request calendar` | `requestCalendarForCurrentUser()` | `src/gas/services/calendar.ts` |
+| `List events` with `Grey Box ID` | `listAllEventsForGreyBoxId()` | `src/gas/services/calendar.ts` |
+| `List events` with `Email` | `listAllEventsForEmail()` | `src/gas/services/calendar.ts` |
+| `List events` with `Calendar ID` | `listAllEventsForCalendarId()` | `src/gas/services/calendar.ts` |
+| `List events` with `Calendar URL` | `listAllEventsForCalendarUrl()` | `src/gas/services/calendar.ts` |
+| `List events` with `Auto` | `listAllEventsForIdentifier()` | `src/gas/services/calendar.ts` |
+| `Check current user` | `getCurrentUserEmail()` | `src/gas/services/calendar.ts` |
+| `Check logger` | `getLoggerHealth()` | `src/gas/services/calendar.ts` |
+| `Debug identity` | `getDebugSummary()` | `src/gas/services/calendar.ts` |
+
+### `List events` Input Modes
+
+The `Lookup by` selector changes which backend function is called:
+
+- `Grey Box ID`
+- `Email`
+- `Calendar ID`
+- `Calendar URL`
+- `Auto`
+
+Grey Box suggestions and prefix autocomplete are active for `Grey Box ID` and `Auto`.
 
 ## Build And Deploy
 
@@ -199,7 +256,7 @@ npm run build:gas
 
 This builds the GAS bundle to:
 
-- `dist/gas/Code.gs`
+- `dist/Code.gs`
 
 ### Push To Apps Script
 
@@ -235,20 +292,20 @@ If the browser still shows old UI code, you are almost always testing the wrong 
 
 ## Project Structure
 
-- [src/gas/calendar.ts](./src/gas/calendar.ts)
+- [src/gas/services/calendar.ts](./src/gas/services/calendar.ts)
   Main business logic for identity, calendars, event listing, sync, logging, and sheet writes.
 
-- [src/gas/index.ts](./src/gas/index.ts)
-  Exposes the GAS bundle through a single `globalThis.__calendarApp` namespace.
-
-- [GasBridge.gs](./GasBridge.gs)
-  Top-level Apps Script bridge functions. These are what Apps Script and `google.script.run` can call.
+- [src/gas/entrypoints/index.ts](./src/gas/entrypoints/index.ts)
+  Registers bundle handlers on `globalThis` for the esbuild footer wrappers and `globalThis.__calendarApp`.
 
 - [index.html](./index.html)
   Web app UI.
 
 - [scripts/build-gas.mjs](./scripts/build-gas.mjs)
-  esbuild script for generating `dist/gas/Code.gs`.
+  esbuild script for generating `dist/Code.gs`.
+
+- [scripts/gas-build.mjs](./scripts/gas-build.mjs)
+  Shared GAS build config and the list of Apps Script functions exposed in the build footer.
 
 - [appsscript.json](./appsscript.json)
   Apps Script manifest.

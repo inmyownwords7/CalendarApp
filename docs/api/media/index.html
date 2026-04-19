@@ -58,10 +58,12 @@
     <input
       id="requestIdentifier"
       type="text"
+      list="greyBoxOptions"
       autocomplete="off"
       placeholder="email, Grey Box ID, or calendar ID"
       style="width: 100%; max-width: 520px; padding: 7px;"
     >
+    <datalist id="greyBoxOptions"></datalist>
     <div class="hint">
       Use this to choose whose tracked calendar to list from the web app.
     </div>
@@ -94,6 +96,7 @@
     const debugLoggerBtn = document.getElementById("debugLogger");
     const debugIdentityBtn = document.getElementById("debugIdentity");
     const debugEl = document.getElementById("debug");
+    const greyBoxOptionsEl = document.getElementById("greyBoxOptions");
     const identifierAutocompleteEl = document.getElementById("identifierAutocomplete");
     let availableGreyBoxIds = [];
 
@@ -183,6 +186,9 @@
       "listAvailableGreyBoxIds",
       (greyBoxIds) => {
         availableGreyBoxIds = Array.isArray(greyBoxIds) ? greyBoxIds : [];
+        greyBoxOptionsEl.innerHTML = availableGreyBoxIds
+          .map((greyBoxId) => `<option value="${greyBoxId}"></option>`)
+          .join("");
       },
       (err) => {
         debugLine("Failed to load Grey Box suggestions", {
@@ -196,42 +202,20 @@
         return "";
       }
 
-      const value = String(rawValue || "").trim().toLowerCase();
+      const value = String(rawValue || "").trim().toUpperCase();
 
       if (!value || value.includes("@")) {
         return "";
       }
 
-      const typedFirstSegment = value.split(".")[0].trim();
-
-      const matches = availableGreyBoxIds.filter((greyBoxId) => {
-        const normalizedGreyBoxId = String(greyBoxId || "").trim().toLowerCase();
-        const greyBoxFirstSegment = normalizedGreyBoxId.split(".")[0].trim();
-        const minimumTriggerLength = Math.max(
-          1,
-          Math.ceil(greyBoxFirstSegment.length * 0.5)
-        );
-
-        if (typedFirstSegment.length < minimumTriggerLength) {
-          return false;
-        }
-
-        if (!greyBoxFirstSegment.startsWith(typedFirstSegment)) {
-          return false;
-        }
-
-        return normalizedGreyBoxId.startsWith(value);
-      });
+      const matches = availableGreyBoxIds.filter((greyBoxId) =>
+        String(greyBoxId || "").toUpperCase().startsWith(value)
+      );
 
       return matches.length === 1 ? matches[0] : "";
     }
 
     function updateIdentifierAutocomplete() {
-      if (!String(requestIdentifierEl.value || "").trim()) {
-        identifierAutocompleteEl.textContent = "";
-        return;
-      }
-
       const suggestion = findUniqueGreyBoxSuggestion(requestIdentifierEl.value);
       identifierAutocompleteEl.textContent = suggestion && suggestion !== requestIdentifierEl.value
         ? `Suggestion: ${suggestion}`
@@ -268,7 +252,6 @@
             functionName: "listAllEventsForEmail",
             placeholder: "name@example.com",
             emptyMessage: "Enter an email address.",
-            invalidMessage: "Email mode requires an address like name@example.com.",
           };
         case "calendarId":
           return {
@@ -292,36 +275,9 @@
         default:
           return {
             functionName: "listAllEventsForGreyBoxId",
-            placeholder: "hui.choo",
+            placeholder: "GB1001",
             emptyMessage: "Enter a Grey Box ID.",
           };
-      }
-    }
-
-    function isValidEmailIdentifier(identifier) {
-      const normalized = String(identifier || "").trim();
-      return normalized.includes("@") && normalized.includes(".");
-    }
-
-    function looksLikeGreyBoxSlug(identifier) {
-      const normalized = String(identifier || "").trim().toLowerCase();
-      return /^[a-z0-9]+([._-][a-z0-9]+)+$/.test(normalized) && !normalized.includes("@");
-    }
-
-    function autoAdjustLookupModeForIdentifier() {
-      const identifier = String(requestIdentifierEl.value || "").trim();
-
-      if (!identifier || lookupModeEl.value !== "email") {
-        return;
-      }
-
-      if (looksLikeGreyBoxSlug(identifier)) {
-        lookupModeEl.value = "greyBoxId";
-        updateLookupModeUi();
-        debugLine("Adjusted lookup mode from email to Grey Box ID", {
-          identifier,
-          mode: lookupModeEl.value,
-        });
       }
     }
 
@@ -439,18 +395,6 @@
         return;
       }
 
-      if (
-        lookupModeEl.value === "email" &&
-        !isValidEmailIdentifier(identifier)
-      ) {
-        setStatus(config.invalidMessage);
-        debugLine("Rejected invalid email-mode identifier", {
-          identifier,
-          mode: lookupModeEl.value,
-        });
-        return;
-      }
-
       setBusy(true);
       setStatus("Listing events...");
       debugLine("Requested event list for identifier", {
@@ -487,10 +431,7 @@
     debugCurrentUserBtn.addEventListener("click", debugCurrentUser);
     debugLoggerBtn.addEventListener("click", debugLogger);
     debugIdentityBtn.addEventListener("click", debugIdentity);
-    requestIdentifierEl.addEventListener("input", () => {
-      autoAdjustLookupModeForIdentifier();
-      tryAutocompleteIdentifier();
-    });
+    requestIdentifierEl.addEventListener("input", tryAutocompleteIdentifier);
     requestIdentifierEl.addEventListener("blur", updateIdentifierAutocomplete);
     lookupModeEl.addEventListener("change", updateLookupModeUi);
     updateLookupModeUi();

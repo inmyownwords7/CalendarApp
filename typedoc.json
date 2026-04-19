@@ -1,0 +1,21 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": [
+    "src/gas/entrypoints",
+    "src/gas/services"
+  ],
+  "entryPointStrategy": "expand",
+  "tsconfig": "tsconfig.gas.json",
+  "out": "docs/api",
+  "exclude": [
+    "**/*.d.ts"
+  ],
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "excludeInternal": true,
+  "sort": [
+    "source-order"
+  ],
+  "readme": "README.md",
+  "gitRevision": "HEAD"
+}

@@ -81,20 +81,44 @@ JSON
 # GAS single-file bundler (esbuild)
 # -----------------------------
 cat > scripts/build-gas.mjs <<'MJS'
+import { GAS_BUILD_OUTFILE, buildGas } from "./gas-build.mjs";
+
+await buildGas();
+
+console.log(`Built ${GAS_BUILD_OUTFILE}`);
+MJS
+
+cat > scripts/gas-build.mjs <<'MJS'
 import { build } from "esbuild";
 
-await build({
-  entryPoints: ["src/gas/index.ts"],
-  bundle: true,
-  platform: "browser",
-  target: "es2019",
-  format: "iife",
-  outfile: "dist/gas/Code.gs",
-  sourcemap: false,
-  legalComments: "none"
-});
+export const GAS_BUILD_OUTFILE = "dist/Code.gs";
 
-console.log("Built dist/gas/Code.gs");
+export const GAS_EXPOSED_FUNCTIONS = Object.freeze([
+  "hello"
+]);
+
+function buildGasFooter() {
+  return GAS_EXPOSED_FUNCTIONS.map(
+    (name) =>
+      `function ${name}() { return globalThis._${name}.apply(globalThis, arguments); }`
+  ).join("\n");
+}
+
+export async function buildGas() {
+  await build({
+    entryPoints: ["src/gas/entrypoints/index.ts"],
+    bundle: true,
+    platform: "browser",
+    target: "es2019",
+    format: "iife",
+    outfile: GAS_BUILD_OUTFILE,
+    sourcemap: false,
+    legalComments: "none",
+    footer: {
+      js: buildGasFooter()
+    }
+  });
+}
 MJS
 
 # -----------------------------
@@ -178,13 +202,18 @@ const notion = new NotionClient({ auth: process.env.NOTION_TOKEN });
 TS
 fi
 
-if [ ! -f src/gas/index.ts ]; then
-  cat > src/gas/index.ts <<'TS'
+mkdir -p src/gas/entrypoints
+
+if [ ! -f src/gas/entrypoints/index.ts ]; then
+  cat > src/gas/entrypoints/index.ts <<'TS'
 /**
- * GAS entrypoint.
- * Export global functions by assigning to globalThis if you are bundling as IIFE.
+ * GAS bundle entrypoint.
+ * Assign handlers to globalThis._name and let the esbuild footer emit
+ * the real top-level Apps Script functions.
  */
-(globalThis as any).hello = () => {
+(
+  globalThis as Record<string, unknown>
+)._hello = () => {
   Logger.log("Hello from GAS bundle!");
 };
 TS
@@ -194,6 +223,6 @@ echo
 echo "✅ Setup complete."
 echo
 echo "Next steps:"
-echo "  1) GAS: npm run build:gas  (outputs dist/gas/Code.gs)"
+echo "  1) GAS: npm run build:gas  (outputs dist/Code.gs)"
 echo "  2) Node dev: npm run dev:node"
 echo "  3) Clasp: npm run clasp:login && npm run clasp:push"
